@@ -1,0 +1,318 @@
+-- Load the WindUI Library
+local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/download/1.6.63/main.lua"))()
+
+-- Load the Icons Library
+local Icons = loadstring(game:HttpGetAsync("https://raw.githubusercontent.com/Footagesus/Icons/main/Main-v2.lua"))()
+Icons.SetIconsType("lucide")
+
+-- Create the Main Window
+local Window = WindUI:CreateWindow({
+    Title = "RatX | Pixel Blade - v0.1 [BETA]",
+    Theme = "Dark",
+    Author = "Ratkinator",
+    Folder = "RatX_Configs",
+    Transparent = true
+})
+
+-- Variables
+local rs = game:GetService("ReplicatedStorage")
+local HttpService = game:GetService("HttpService")
+local lp = game.Players.LocalPlayer
+local KB_Enabled = false
+local AutoRaidEnabled = false
+local AutoBuffEnabled = false
+local AutoAbilityEnabled = false
+local SelectedBuff = 1
+local selectedAbilitys = {}
+local FlySpeed = 70 
+local LastCheckTick = tick()
+local RaidWaveCooldown = false
+local bossRoomWaitActive = false
+_G.Data = _G.Data or {}
+
+-- Data (Fixed table.insert syntax)
+local abilities = {}
+local enemies = {}
+
+local animsFolder = rs:WaitForChild("Anims")
+local enemiesFolder = rs:WaitForChild("Enemies")
+
+for _, anim in ipairs(animsFolder:GetChildren()) do
+    local name = anim.Name
+    if name:match("^Ability") then
+        local abilityName = name:gsub("^Ability", "")
+        table.insert(abilities, abilityName)
+    end
+end
+
+for _, item in ipairs(enemiesFolder:GetChildren()) do
+    if item:IsA("Model") then
+        table.insert(enemies, item.Name)
+    elseif item:IsA("Folder") then
+        for _, model in ipairs(item:GetChildren()) do
+            if model:IsA("Model") then
+                table.insert(enemies, model.Name)
+            end
+        end
+    end
+end
+local targetsList = enemies
+
+-- Helper Functions
+local function SafeLanding()
+    local char = lp.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if root then
+        root.Anchored = true
+        root.Velocity = Vector3.new(0,0,0)
+        local plat = Instance.new("Part", workspace)
+        plat.Size = Vector3.new(15, 1, 15)
+        plat.CFrame = root.CFrame * CFrame.new(0, -3.1, 0)
+        plat.Anchored = true
+        task.wait(1)
+        root.Anchored = false
+        task.wait(2)
+        plat:Destroy()
+    end
+end
+
+local function IsValidTarget(obj)
+    if obj.Name == "Clyde" or obj.Name == "ClydeOLD" or obj:FindFirstChild("Friendly") then return false end
+    return table.find(targetsList, obj.Name) or obj.Name == "GiantGoblin"
+end
+
+local function KillTargets()
+    for _, v in ipairs(workspace:GetChildren()) do
+        if IsValidTarget(v) then
+            local targetPart = (v:IsA("Model") and v.PrimaryPart) or v
+            if targetPart then
+                rs.remotes.kb:FireServer(targetPart, Vector3.new(0, -1000000, 0), 999)
+            end
+        end
+    end
+end
+
+local function GetClosestTarget()
+    local closest, dist = nil, math.huge
+    for _, v in ipairs(workspace:GetChildren()) do
+        if IsValidTarget(v) then
+            local p = v:IsA("Model") and v.PrimaryPart or v:IsA("BasePart") and v
+            if p and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart") then
+                local d = (p.Position - lp.Character.HumanoidRootPart.Position).Magnitude
+                if d < dist then dist = d; closest = p end
+            end
+        end
+    end
+    return closest
+end
+
+local function MobsExist()
+    for _, v in ipairs(workspace:GetChildren()) do
+        if IsValidTarget(v) then return true end
+    end
+    return false
+end
+
+local function GetExecCount()
+    local success, r = pcall(function() return game:HttpGet("https://halal-worker.vvladut245.workers.dev/") end)
+    if success then
+        local JSON = HttpService:JSONDecode(r)
+        return JSON.global_count or "0"
+    end
+    return "0"
+end
+local Count = GetExecCount()
+
+--- TABS ---
+local HomeTab = Window:Tab({ Title = "Home", Icon = "home" })
+local MainTab = Window:Tab({ Title = "Main", Icon = "swords" })
+local RaidsTab = Window:Tab({ Title = "Raids", Icon = "zap" })
+local MiscTab = Window:Tab({ Title = "Misc", Icon = "component" })
+local InfoTab = Window:Tab({ Title = "Info", Icon = "info" })
+
+-- SECTIONS
+local LocalPlayer = HomeTab:Section({ Title = "LocalPlayer" })
+local AutoFarmSection = MainTab:Section({ Title = "Auto Farm" })
+local Ability = MainTab:Section({ Title = "Ability" })
+local Combat = MainTab:Section({ Title = "Combat" })
+local RaidsCombactSection = RaidsTab:Section({ Title = "Raid Combat" })
+local RaidsUpgradeSection = RaidsTab:Section({ Title = "Raid Upgrades" })
+local MiscSection = MiscTab:Section({ Title = "Interactions" })
+local Executions = InfoTab:Section({ Title = "Executions" })
+
+-- HOME TAB
+LocalPlayer:Slider({ Title = "Fly Speed", Min = 10, Max = 300, Value = 70, Callback = function(v) FlySpeed = v end })
+
+-- MAIN TAB (Dungeon Logic for 20, 22, 23)
+AutoFarmSection:Toggle({
+    Title = "Autofarm Dungeon",
+    Value = false,
+    Callback = function(state)
+        KB_Enabled = state
+        if KB_Enabled then
+            task.spawn(function()
+                while KB_Enabled do
+                    local char = lp.Character
+                    local root = char and char:FindFirstChild("HumanoidRootPart")
+                    if not root then task.wait(0.1); continue end
+                    
+                    local zoneNum = 0
+                    for i=26, 1, -1 do if workspace:FindFirstChild(tostring(i)) then zoneNum = i; break end end
+
+                    local targetMob = GetClosestTarget()
+                    local destination = nil
+                    
+                    if zoneNum == 14 and workspace:FindFirstChild("FallenBridge") then
+                        local door = workspace.FallenBridge:FindFirstChild("ExitDoor")
+                        destination = door and (door.Position + Vector3.new(0, 12, 0)) or nil
+                    elseif zoneNum == 20 then
+                        if targetMob then destination = targetMob.Position + Vector3.new(0, 15, 0) 
+                        else
+                            local z20 = workspace:FindFirstChild("20")
+                            destination = (z20:IsA("Model") and z20:GetModelCFrame().p or z20.Position) + Vector3.new(0, 25, 0)
+                        end
+                    elseif targetMob then destination = targetMob.Position
+                    elseif workspace:FindFirstChild(tostring(zoneNum)) then
+                        local z = workspace[tostring(zoneNum)]
+                        destination = z:IsA("Model") and z:GetModelCFrame().p or z.Position
+                    end
+
+                    local bv = root:FindFirstChild("AutoFarmVelocity") or Instance.new("BodyVelocity", root)
+                    bv.Name = "AutoFarmVelocity"
+                    bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+                    if destination then
+                        bv.Velocity = (destination - root.Position).Unit * FlySpeed
+                    end
+
+                    if zoneNum == 22 then
+                        _G.KillAura = true
+                        KillTargets()
+                    elseif zoneNum == 23 then
+                        if not bossRoomWaitActive then
+                            bossRoomWaitActive = true
+                            _G.KillAura = true
+                            task.wait(10)
+                            KillTargets()
+                        else KillTargets() end
+                    else
+                        bossRoomWaitActive = false
+                        KillTargets()
+                    end
+                    task.wait(0.1)
+                end
+                if lp.Character and lp.Character:FindFirstChild("HumanoidRootPart") then
+                    if lp.Character.HumanoidRootPart:FindFirstChild("AutoFarmVelocity") then lp.Character.HumanoidRootPart.AutoFarmVelocity:Destroy() end
+                end
+            end)
+        end
+    end
+})
+
+Ability:Dropdown({
+    Title = "Select Abilities",
+    Values = abilities,
+    Multi = true,
+    Callback = function(option) selectedAbilitys = option end
+})
+
+Ability:Toggle({
+    Title = "Auto Ability",
+    Value = false,
+    Callback = function(state)
+        AutoAbilityEnabled = state
+        task.spawn(function()
+            while AutoAbilityEnabled do
+                for _, v in ipairs(selectedAbilitys) do
+                    if not AutoAbilityEnabled then break end
+                    rs.remotes.useAbility:FireServer(v)
+                end
+                task.wait(0.5)
+            end
+        end)
+    end
+})
+
+Combat:Toggle({
+    Title = "Kill Aura",
+    Value = false,
+    Callback = function(Value)
+        _G.KillAura = Value
+        task.spawn(function()
+            while _G.KillAura do
+                pcall(function()
+                    for _, model in ipairs(workspace:GetDescendants()) do
+                        if model:IsA("Model") and model ~= lp.Character and model:FindFirstChild("Humanoid") then
+                            local hrp = model:FindFirstChild("HumanoidRootPart")
+                            if hrp and (hrp.Position - lp.Character.HumanoidRootPart.Position).Magnitude <= 30 then
+                                rs.remotes.swing:FireServer()
+                                rs.remotes.onHit:FireServer(model.Humanoid, math.huge, {}, 0)
+                            end
+                        end
+                    end
+                end)
+                task.wait(0.03)
+            end
+        end)
+    end
+})
+
+-- RAIDS TAB
+RaidsCombactSection:Toggle({
+    Title = "AutoRaid",
+    Value = false,
+    Callback = function(state)
+        AutoRaidEnabled = state
+        if AutoRaidEnabled then
+            task.spawn(function()
+                while AutoRaidEnabled do
+                    local char = lp.Character
+                    local root = char and char:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        if AutoBuffEnabled then rs.remotes.plrUpgrade:FireServer(SelectedBuff) end
+                        local rbv = root:FindFirstChild("RaidVel") or Instance.new("BodyVelocity", root); rbv.Name = "RaidVel"; rbv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+                        local tree = workspace:FindFirstChild("RaidArena") and workspace.RaidArena:FindFirstChild("CrystalTree")
+                        if tree then
+                            local treePos = (tree:IsA("Model") and tree:GetModelCFrame().p) or tree.Position
+                            rbv.Velocity = (root.Position - treePos).Magnitude > 3 and (treePos - root.Position).Unit * FlySpeed or Vector3.new(0,0,0)
+                        end
+                        if MobsExist() then KillTargets() end
+                    end
+                    task.wait(0.1)
+                end
+                SafeLanding()
+            end)
+        end
+    end
+})
+RaidsCombactSection:Toggle({ Title = "AutoBuff Select", Value = false, Callback = function(s) AutoBuffEnabled = s end })
+RaidsUpgradeSection:Dropdown({ Title = "Prioritize Card #", Values = {"1", "2", "3"}, Callback = function(v) SelectedBuff = tonumber(v) end })
+
+-- MISC TAB
+MiscSection:Toggle({ Title = "Perish My Children (Loop)", Value = false, Callback = function(s) _G.Data.PerishLoop = s end })
+MiscSection:Button({
+    Title = "Perish My Children (Instant)",
+    Callback = function()
+        for _, p in pairs(game.Players:GetPlayers()) do
+            if p ~= lp and p.Character and p.Character.PrimaryPart then
+                rs.remotes.kb:FireServer(p.Character.PrimaryPart, Vector3.new(math.random(-5e4, 5e4), 1e6, math.random(-5e4, 5e4)), 999)
+            end
+        end
+    end
+})
+
+task.spawn(function()
+    while task.wait(0.1) do
+        if _G.Data.PerishLoop then
+            for _, p in pairs(game.Players:GetPlayers()) do
+                if p ~= lp and p.Character and p.Character.PrimaryPart then
+                    rs.remotes.kb:FireServer(p.Character.PrimaryPart, Vector3.new(math.random(-5e4, 5e4), 1e6, math.random(-5e4, 5e4)), 999)
+                end
+            end
+        end
+    end
+end)
+
+-- INFO TAB
+Executions:Paragraph({ Title = "Total Executions:", Desc = tostring(Count) })
+
+HomeTab:Select()
