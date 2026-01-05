@@ -1,23 +1,57 @@
--- Load the WindUI Library
-local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/download/1.6.63/main.lua"))()
+-- Load WindUI
+local WindUI
+local winduiSuccess = false
 
--- Load the Icons Library
-local Icons = loadstring(game:HttpGetAsync("https://raw.githubusercontent.com/Footagesus/Icons/main/Main-v2.lua"))()
-Icons.SetIconsType("lucide")
+local urls = {
+    "https://github.com/Footagesus/WindUI/releases/latest/download/main.lua",
+    "https://raw.githubusercontent.com/Footagesus/WindUI/main/source.lua"
+}
 
--- Create the Main Window
+for _, url in ipairs(urls) do
+    if not winduiSuccess then
+        local success, result = pcall(function()
+            return loadstring(game:HttpGet(url, true))()
+        end)
+        
+        if success and result then
+            WindUI = result
+            winduiSuccess = true
+            print("[Rat Hub X] WindUI loaded from: " .. url)
+            break
+        end
+    end
+end
+
+if not winduiSuccess then
+    warn("[Rat Hub X] Failed to load WindUI")
+    return
+end
+
+-- Create Main Window
 local Window = WindUI:CreateWindow({
-    Title = "RatX | Pixel Blade - v0.1 [BETA]",
+    Title = "Rat Hub X | Pixel Blade",
     Theme = "Dark",
     Author = "Ratkinator",
-    Folder = "RatX_Configs",
+    Folder = "RatHubX_Configs",
     Transparent = true
 })
 
--- Variables
+-- Add Tag (Fixed to match WindUI documentation style)
+Window:Tag({
+    Title = "v0.1 [BETA]",
+    Icon = "github",
+    Color = Color3.fromHex("#30ff6a"),
+    Radius = 6, -- Changed from 0 to 6 for rounded corners
+})
+
+print("[Rat Hub X] Window Created")
+
+-- --- VARIABLES ---
 local rs = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
 local lp = game.Players.LocalPlayer
+local RunService = game:GetService("RunService")
+
 local KB_Enabled = false
 local AutoRaidEnabled = false
 local AutoBuffEnabled = false
@@ -25,41 +59,68 @@ local AutoAbilityEnabled = false
 local SelectedBuff = 1
 local selectedAbilitys = {}
 local FlySpeed = 70 
-local LastCheckTick = tick()
-local RaidWaveCooldown = false
+local ActiveBV = nil
+local ActiveBG = nil
 local bossRoomWaitActive = false
+local currentZone = 1
+local zoneWaitTime = 3 -- Seconds to wait in each zone
 _G.Data = _G.Data or {}
+_G.KillAura = false
 
--- Data (Fixed table.insert syntax)
+print("[Rat Hub X] Variables Initialized")
+
+-- --- DATA SCRAPING ---
 local abilities = {}
 local enemies = {}
 
-local animsFolder = rs:WaitForChild("Anims")
-local enemiesFolder = rs:WaitForChild("Enemies")
+local animsFolder = rs:FindFirstChild("Anims")
+local enemiesFolder = rs:FindFirstChild("Enemies")
 
-for _, anim in ipairs(animsFolder:GetChildren()) do
-    local name = anim.Name
-    if name:match("^Ability") then
-        local abilityName = name:gsub("^Ability", "")
-        table.insert(abilities, abilityName)
-    end
-end
-
-for _, item in ipairs(enemiesFolder:GetChildren()) do
-    if item:IsA("Model") then
-        table.insert(enemies, item.Name)
-    elseif item:IsA("Folder") then
-        for _, model in ipairs(item:GetChildren()) do
-            if model:IsA("Model") then
-                table.insert(enemies, model.Name)
+if animsFolder then
+    for _, anim in ipairs(animsFolder:GetChildren()) do
+        local name = anim.Name
+        -- FIXED: Check if name is not nil before substring
+        if name and type(name) == "string" and name:sub(1, 7) == "Ability" then
+            local abilityName = name:sub(8)
+            if abilityName ~= "" then
+                abilities[#abilities + 1] = abilityName
             end
         end
     end
+    print("[Rat Hub X] Found " .. #abilities .. " abilities")
+else
+    print("[Rat Hub X] No Anims folder")
+    abilities = {"Swing", "Dash", "Heal"}
 end
-local targetsList = enemies
 
--- Helper Functions
+if enemiesFolder then
+    for _, item in ipairs(enemiesFolder:GetChildren()) do
+        if item:IsA("Model") then
+            enemies[#enemies + 1] = item.Name
+        elseif item:IsA("Folder") then
+            for _, model in ipairs(item:GetChildren()) do
+                if model:IsA("Model") then
+                    enemies[#enemies + 1] = model.Name
+                end
+            end
+        end
+    end
+    print("[Rat Hub X] Found " .. #enemies .. " enemies")
+else
+    enemies = {"Goblin", "Skeleton"}
+end
+
+table.sort(abilities)
+table.sort(enemies)
+
+-- --- HELPER FUNCTIONS ---
+local function CleanPhysics()
+    if ActiveBV then ActiveBV:Destroy(); ActiveBV = nil end
+    if ActiveBG then ActiveBG:Destroy(); ActiveBG = nil end
+end
+
 local function SafeLanding()
+    CleanPhysics()
     local char = lp.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if root then
@@ -71,230 +132,458 @@ local function SafeLanding()
         plat.Anchored = true
         task.wait(1)
         root.Anchored = false
-        task.wait(2)
+        task.wait(1)
         plat:Destroy()
     end
 end
 
 local function IsValidTarget(obj)
-    if obj.Name == "Clyde" or obj.Name == "ClydeOLD" or obj:FindFirstChild("Friendly") then return false end
-    return table.find(targetsList, obj.Name) or obj.Name == "GiantGoblin"
+    if not obj then return false end
+    if obj.Name == "Clyde" or obj.Name == "ClydeOLD" then return false end
+    if obj:FindFirstChild("Friendly") then return false end
+    
+    for _, enemy in ipairs(enemies) do
+        if obj.Name == enemy then return true end
+    end
+    return obj.Name == "GiantGoblin" or obj.Name == "Kingslayer"
 end
 
 local function KillTargets()
     for _, v in ipairs(workspace:GetChildren()) do
         if IsValidTarget(v) then
-            local targetPart = (v:IsA("Model") and v.PrimaryPart) or v
-            if targetPart then
-                rs.remotes.kb:FireServer(targetPart, Vector3.new(0, -1000000, 0), 999)
+            local p = (v:IsA("Model") and v.PrimaryPart) or v
+            if p and p:IsA("BasePart") then
+                pcall(function()
+                    rs.remotes.kb:FireServer(p, Vector3.new(0, -1000000, 0), 999)
+                end)
             end
         end
     end
 end
 
-local function GetClosestTarget()
+local function CountTargetsInZone(zoneNum)
+    local count = 0
+    local zone = workspace:FindFirstChild(tostring(zoneNum))
+    if zone then
+        for _, v in ipairs(zone:GetDescendants()) do
+            if v:IsA("Model") and IsValidTarget(v) then
+                count = count + 1
+            end
+        end
+    end
+    return count
+end
+
+local function GetZoneCenter(zoneNum)
+    local zone = workspace:FindFirstChild(tostring(zoneNum))
+    if zone then
+        if zone:IsA("Model") then
+            return zone:GetModelCFrame().p
+        else
+            return zone.Position
+        end
+    end
+    return nil
+end
+
+local function GetClosestTargetInZone(zoneNum)
     local closest, dist = nil, math.huge
-    for _, v in ipairs(workspace:GetChildren()) do
-        if IsValidTarget(v) then
-            local p = v:IsA("Model") and v.PrimaryPart or v:IsA("BasePart") and v
-            if p and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart") then
-                local d = (p.Position - lp.Character.HumanoidRootPart.Position).Magnitude
-                if d < dist then dist = d; closest = p end
+    local zone = workspace:FindFirstChild(tostring(zoneNum))
+    local char = lp.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    
+    if zone and root then
+        for _, v in ipairs(zone:GetDescendants()) do
+            if v:IsA("Model") and IsValidTarget(v) then
+                local p = v.PrimaryPart
+                if p then
+                    local d = (p.Position - root.Position).Magnitude
+                    if d < dist then
+                        dist = d
+                        closest = p
+                    end
+                end
             end
         end
     end
     return closest
 end
 
-local function MobsExist()
-    for _, v in ipairs(workspace:GetChildren()) do
-        if IsValidTarget(v) then return true end
+-- --- IMPROVED TWEENING SYSTEM ---
+local function MoveToPosition(position)
+    local char = lp.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    
+    if not ActiveBV then
+        ActiveBV = Instance.new("BodyVelocity", root)
+        ActiveBV.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+        ActiveBG = Instance.new("BodyGyro", root)
+        ActiveBG.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
     end
+    
+    -- Disable collision for character parts
+    for _, v in ipairs(char:GetDescendants()) do 
+        if v:IsA("BasePart") then 
+            v.CanCollide = false 
+        end 
+    end
+    
+    -- Calculate direction and distance
+    local direction = (position - root.Position)
+    local distance = direction.Magnitude
+    
+    if distance < 5 then
+        if ActiveBV then
+            ActiveBV.Velocity = Vector3.new(0,0,0)
+        end
+        return true -- Reached destination
+    end
+    
+    -- Smooth movement
+    local moveDirection = direction.Unit
+    if ActiveBV then
+        ActiveBV.Velocity = moveDirection * math.min(FlySpeed, distance * 2)
+    end
+    if ActiveBG then
+        ActiveBG.CFrame = CFrame.new(root.Position, root.Position + moveDirection)
+    end
+    
     return false
 end
 
-local function GetExecCount()
-    local success, r = pcall(function() return game:HttpGet("https://halal-worker.vvladut245.workers.dev/") end)
-    if success then
-        local JSON = HttpService:JSONDecode(r)
-        return JSON.global_count or "0"
-    end
-    return "0"
-end
-local Count = GetExecCount()
-
---- TABS ---
+-- --- UI TABS ---
 local HomeTab = Window:Tab({ Title = "Home", Icon = "home" })
 local MainTab = Window:Tab({ Title = "Main", Icon = "swords" })
 local RaidsTab = Window:Tab({ Title = "Raids", Icon = "zap" })
 local MiscTab = Window:Tab({ Title = "Misc", Icon = "component" })
+local SettingsTab = Window:Tab({ Title = "Settings", Icon = "settings" })
 local InfoTab = Window:Tab({ Title = "Info", Icon = "info" })
 
--- SECTIONS
-local LocalPlayer = HomeTab:Section({ Title = "LocalPlayer" })
+-- --- SECTIONS ---
+local HomeSection = HomeTab:Section({ Title = "LocalPlayer" })
 local AutoFarmSection = MainTab:Section({ Title = "Auto Farm" })
-local Ability = MainTab:Section({ Title = "Ability" })
-local Combat = MainTab:Section({ Title = "Combat" })
-local RaidsCombactSection = RaidsTab:Section({ Title = "Raid Combat" })
+local AbilitySection = MainTab:Section({ Title = "Ability" })
+local CombatSection = MainTab:Section({ Title = "Combat" })
+local RaidsCombatSection = RaidsTab:Section({ Title = "Raid Combat" })
 local RaidsUpgradeSection = RaidsTab:Section({ Title = "Raid Upgrades" })
 local MiscSection = MiscTab:Section({ Title = "Interactions" })
-local Executions = InfoTab:Section({ Title = "Executions" })
+local SettingsSection = SettingsTab:Section({ Title = "Configuration" })
+local InfoSection = InfoTab:Section({ Title = "Stats" })
 
--- HOME TAB
-LocalPlayer:Slider({ Title = "Fly Speed", Min = 10, Max = 300, Value = 70, Callback = function(v) FlySpeed = v end })
+-- --- HOME TAB ---
+HomeSection:Slider({
+    Title = "Fly Speed",
+    Min = 10,
+    Max = 300,
+    Default = 70,
+    Callback = function(v) 
+        FlySpeed = v 
+        print("[Rat Hub X] Fly Speed: " .. v)
+    end
+})
 
--- MAIN TAB (Dungeon Logic for 20, 22, 23)
+HomeSection:Slider({
+    Title = "Zone Wait Time",
+    Min = 1,
+    Max = 10,
+    Default = 3,
+    Callback = function(v)
+        zoneWaitTime = v
+        print("[Rat Hub X] Zone Wait: " .. v .. "s")
+    end
+})
+
+-- --- MAIN TAB ---
 AutoFarmSection:Toggle({
     Title = "Autofarm Dungeon",
-    Value = false,
+    Default = false,
     Callback = function(state)
         KB_Enabled = state
+        print("[Rat Hub X] Autofarm: " .. tostring(state))
+        
         if KB_Enabled then
             task.spawn(function()
+                local lastKillCheck = 0
+                local zoneStartTime = 0
+                local isWaitingInZone = false
+                local currentDestination = nil
+                
                 while KB_Enabled do
                     local char = lp.Character
                     local root = char and char:FindFirstChild("HumanoidRootPart")
-                    if not root then task.wait(0.1); continue end
+                    if not root then 
+                        task.wait(0.5) 
+                        continue 
+                    end
                     
-                    local zoneNum = 0
-                    for i=26, 1, -1 do if workspace:FindFirstChild(tostring(i)) then zoneNum = i; break end end
-
-                    local targetMob = GetClosestTarget()
-                    local destination = nil
-                    
-                    if zoneNum == 14 and workspace:FindFirstChild("FallenBridge") then
-                        local door = workspace.FallenBridge:FindFirstChild("ExitDoor")
-                        destination = door and (door.Position + Vector3.new(0, 12, 0)) or nil
-                    elseif zoneNum == 20 then
-                        if targetMob then destination = targetMob.Position + Vector3.new(0, 15, 0) 
-                        else
-                            local z20 = workspace:FindFirstChild("20")
-                            destination = (z20:IsA("Model") and z20:GetModelCFrame().p or z20.Position) + Vector3.new(0, 25, 0)
+                    -- Find current zone
+                    local foundZone = false
+                    for i = 26, 1, -1 do
+                        if workspace:FindFirstChild(tostring(i)) then
+                            currentZone = i
+                            foundZone = true
+                            break
                         end
-                    elseif targetMob then destination = targetMob.Position
-                    elseif workspace:FindFirstChild(tostring(zoneNum)) then
-                        local z = workspace[tostring(zoneNum)]
-                        destination = z:IsA("Model") and z:GetModelCFrame().p or z.Position
                     end
-
-                    local bv = root:FindFirstChild("AutoFarmVelocity") or Instance.new("BodyVelocity", root)
-                    bv.Name = "AutoFarmVelocity"
-                    bv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
-                    if destination then
-                        bv.Velocity = (destination - root.Position).Unit * FlySpeed
+                    
+                    if not foundZone then
+                        task.wait(0.5)
+                        continue
                     end
-
-                    if zoneNum == 22 then
+                    
+                    -- Special zone logic
+                    if currentZone == 14 and workspace:FindFirstChild("FallenBridge") then
+                        local door = workspace.FallenBridge:FindFirstChild("ExitDoor")
+                        if door then
+                            currentDestination = door.Position + Vector3.new(0, 12, 0)
+                        end
+                    elseif currentZone == 23 then
+                        local door = workspace:FindFirstChild("BossRoom") and workspace.BossRoom:FindFirstChild("Door")
+                        if door then
+                            currentDestination = door.Position
+                            if (root.Position - door.Position).Magnitude < 12 then
+                                for _, p in ipairs(workspace:GetDescendants()) do 
+                                    if p:IsA("ProximityPrompt") then 
+                                        fireproximityprompt(p) 
+                                    end 
+                                end
+                                if not bossRoomWaitActive then
+                                    bossRoomWaitActive = true
+                                    task.wait(10)
+                                end
+                                local boss = workspace:FindFirstChild("Kingslayer")
+                                if boss and boss.PrimaryPart then 
+                                    currentDestination = boss.PrimaryPart.Position 
+                                end
+                            end
+                        end
+                    end
+                    
+                    -- Get closest target or zone center
+                    if not currentDestination then
+                        local target = GetClosestTargetInZone(currentZone)
+                        if target then
+                            currentDestination = target.Position + Vector3.new(0, 5, 0)
+                        else
+                            local zoneCenter = GetZoneCenter(currentZone)
+                            if zoneCenter then
+                                currentDestination = zoneCenter + Vector3.new(0, 10, 0)
+                            end
+                        end
+                    end
+                    
+                    -- Move to destination
+                    if currentDestination then
+                        local reached = MoveToPosition(currentDestination)
+                        
+                        -- Check if we should wait in zone
+                        if reached or (os.clock() - lastKillCheck > 1) then
+                            lastKillCheck = os.clock()
+                            local targetCount = CountTargetsInZone(currentZone)
+                            
+                            if targetCount == 0 then
+                                if not isWaitingInZone then
+                                    zoneStartTime = os.clock()
+                                    isWaitingInZone = true
+                                    print("[Rat Hub X] Zone " .. currentZone .. " cleared, waiting " .. zoneWaitTime .. "s")
+                                end
+                                
+                                -- Wait time completed, move to next zone
+                                if isWaitingInZone and (os.clock() - zoneStartTime) >= zoneWaitTime then
+                                    print("[Rat Hub X] Moving to next zone")
+                                    isWaitingInZone = false
+                                    currentDestination = nil
+                                    task.wait(0.5)
+                                end
+                            else
+                                isWaitingInZone = false
+                                KillTargets()
+                            end
+                        end
+                    end
+                    
+                    -- Kill aura in zone 22
+                    if currentZone == 22 then
                         _G.KillAura = true
-                        KillTargets()
-                    elseif zoneNum == 23 then
-                        if not bossRoomWaitActive then
-                            bossRoomWaitActive = true
-                            _G.KillAura = true
-                            task.wait(10)
-                            KillTargets()
-                        else KillTargets() end
-                    else
-                        bossRoomWaitActive = false
-                        KillTargets()
+                    elseif _G.KillAura then
+                        _G.KillAura = false
                     end
+                    
                     task.wait(0.1)
                 end
-                if lp.Character and lp.Character:FindFirstChild("HumanoidRootPart") then
-                    if lp.Character.HumanoidRootPart:FindFirstChild("AutoFarmVelocity") then lp.Character.HumanoidRootPart.AutoFarmVelocity:Destroy() end
+                
+                CleanPhysics()
+                print("[Rat Hub X] Autofarm stopped")
+            end)
+        else
+            CleanPhysics()
+        end
+    end
+})
+
+-- Ability Section (FIXED - Using correct WindUI documentation format)
+AbilitySection:Dropdown({
+    Title = "Select Abilities",
+    Desc = "Choose abilities to auto-use",
+    Values = abilities,
+    Value = {}, -- Start with none selected
+    Multi = true,
+    AllowNone = true,
+    Callback = function(selected)
+        if type(selected) == "table" then
+            selectedAbilitys = selected
+            print("[Rat Hub X] Abilities selected: " .. table.concat(selected, ", "))
+        else
+            selectedAbilitys = {}
+        end
+    end
+})
+
+AbilitySection:Toggle({
+    Title = "Auto Ability",
+    Desc = "Automatically use selected abilities",
+    Default = false,
+    Callback = function(state)
+        AutoAbilityEnabled = state
+        print("[Rat Hub X] Auto Ability: " .. tostring(state))
+        
+        if AutoAbilityEnabled then
+            task.spawn(function()
+                while AutoAbilityEnabled do
+                    for _, ability in ipairs(selectedAbilitys) do
+                        if not AutoAbilityEnabled then break end
+                        pcall(function()
+                            rs.remotes.useAbility:FireServer(ability)
+                        end)
+                    end
+                    task.wait(0.5)
                 end
             end)
         end
     end
 })
 
-Ability:Dropdown({
-    Title = "Select Abilities",
-    Values = abilities,
-    Multi = true,
-    Callback = function(option) selectedAbilitys = option end
-})
-
-Ability:Toggle({
-    Title = "Auto Ability",
-    Value = false,
-    Callback = function(state)
-        AutoAbilityEnabled = state
-        task.spawn(function()
-            while AutoAbilityEnabled do
-                for _, v in ipairs(selectedAbilitys) do
-                    if not AutoAbilityEnabled then break end
-                    rs.remotes.useAbility:FireServer(v)
-                end
-                task.wait(0.5)
-            end
-        end)
-    end
-})
-
-Combat:Toggle({
+CombatSection:Toggle({
     Title = "Kill Aura",
-    Value = false,
-    Callback = function(Value)
-        _G.KillAura = Value
-        task.spawn(function()
-            while _G.KillAura do
-                pcall(function()
-                    for _, model in ipairs(workspace:GetDescendants()) do
-                        if model:IsA("Model") and model ~= lp.Character and model:FindFirstChild("Humanoid") then
-                            local hrp = model:FindFirstChild("HumanoidRootPart")
-                            if hrp and (hrp.Position - lp.Character.HumanoidRootPart.Position).Magnitude <= 30 then
-                                rs.remotes.swing:FireServer()
-                                rs.remotes.onHit:FireServer(model.Humanoid, math.huge, {}, 0)
+    Desc = "Attack nearby enemies automatically",
+    Default = false,
+    Callback = function(state)
+        _G.KillAura = state
+        print("[Rat Hub X] Kill Aura: " .. tostring(state))
+        
+        if _G.KillAura then
+            task.spawn(function()
+                while _G.KillAura do
+                    pcall(function()
+                        for _, model in ipairs(workspace:GetDescendants()) do
+                            if model:IsA("Model") and model ~= lp.Character and model:FindFirstChild("Humanoid") then
+                                local hrp = model:FindFirstChild("HumanoidRootPart")
+                                if hrp and lp.Character and lp.Character:FindFirstChild("HumanoidRootPart") then
+                                    local distance = (hrp.Position - lp.Character.HumanoidRootPart.Position).Magnitude
+                                    if distance < 30 then
+                                        rs.remotes.swing:FireServer()
+                                        rs.remotes.onHit:FireServer(model.Humanoid, math.huge, {}, 0)
+                                    end
+                                end
                             end
                         end
-                    end
-                end)
-                task.wait(0.03)
-            end
-        end)
+                    end)
+                    task.wait(0.1)
+                end
+            end)
+        end
     end
 })
 
--- RAIDS TAB
-RaidsCombactSection:Toggle({
+-- --- RAIDS TAB ---
+RaidsCombatSection:Toggle({
     Title = "AutoRaid",
-    Value = false,
+    Desc = "Automatically farm raids",
+    Default = false,
     Callback = function(state)
         AutoRaidEnabled = state
+        print("[Rat Hub X] AutoRaid: " .. tostring(state))
+        
         if AutoRaidEnabled then
             task.spawn(function()
                 while AutoRaidEnabled do
                     local char = lp.Character
                     local root = char and char:FindFirstChild("HumanoidRootPart")
                     if root then
-                        if AutoBuffEnabled then rs.remotes.plrUpgrade:FireServer(SelectedBuff) end
-                        local rbv = root:FindFirstChild("RaidVel") or Instance.new("BodyVelocity", root); rbv.Name = "RaidVel"; rbv.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+                        if not ActiveBV then
+                            ActiveBV = Instance.new("BodyVelocity", root)
+                            ActiveBV.MaxForce = Vector3.new(9e9, 9e9, 9e9)
+                            ActiveBG = Instance.new("BodyGyro", root)
+                            ActiveBG.MaxTorque = Vector3.new(9e9, 9e9, 9e9)
+                        end
+                        
+                        if AutoBuffEnabled then 
+                            pcall(function()
+                                rs.remotes.plrUpgrade:FireServer(SelectedBuff) 
+                            end)
+                        end
+                        
                         local tree = workspace:FindFirstChild("RaidArena") and workspace.RaidArena:FindFirstChild("CrystalTree")
                         if tree then
                             local treePos = (tree:IsA("Model") and tree:GetModelCFrame().p) or tree.Position
-                            rbv.Velocity = (root.Position - treePos).Magnitude > 3 and (treePos - root.Position).Unit * FlySpeed or Vector3.new(0,0,0)
+                            MoveToPosition(treePos)
                         end
-                        if MobsExist() then KillTargets() end
+                        
+                        KillTargets()
                     end
                     task.wait(0.1)
                 end
                 SafeLanding()
             end)
+        else
+            SafeLanding()
         end
     end
 })
-RaidsCombactSection:Toggle({ Title = "AutoBuff Select", Value = false, Callback = function(s) AutoBuffEnabled = s end })
-RaidsUpgradeSection:Dropdown({ Title = "Prioritize Card #", Values = {"1", "2", "3"}, Callback = function(v) SelectedBuff = tonumber(v) end })
 
--- MISC TAB
-MiscSection:Toggle({ Title = "Perish My Children (Loop)", Value = false, Callback = function(s) _G.Data.PerishLoop = s end })
+RaidsCombatSection:Toggle({ 
+    Title = "Auto Buff", 
+    Desc = "Automatically purchase buffs",
+    Default = false,
+    Callback = function(v) 
+        AutoBuffEnabled = v 
+        print("[Rat Hub X] Auto Buff: " .. tostring(v))
+    end 
+})
+
+RaidsUpgradeSection:Dropdown({
+    Title = "Prioritize Card",
+    Desc = "Choose which card to prioritize",
+    Values = {"1", "2", "3"},
+    Value = "1",
+    Callback = function(v) 
+        SelectedBuff = tonumber(v) or 1
+        print("[Rat Hub X] Buff Priority: " .. SelectedBuff)
+    end
+})
+
+-- --- MISC TAB ---
+MiscSection:Toggle({
+    Title = "Perish Loop",
+    Desc = "Continuously knockback other players",
+    Default = false,
+    Callback = function(state) 
+        _G.Data.PerishLoop = state 
+        print("[Rat Hub X] Perish Loop: " .. tostring(state))
+    end
+})
+
 MiscSection:Button({
-    Title = "Perish My Children (Instant)",
+    Title = "Perish Instant",
+    Desc = "Knockback all players once",
     Callback = function()
+        print("[Rat Hub X] Executing Instant Perish")
         for _, p in pairs(game.Players:GetPlayers()) do
             if p ~= lp and p.Character and p.Character.PrimaryPart then
-                rs.remotes.kb:FireServer(p.Character.PrimaryPart, Vector3.new(math.random(-5e4, 5e4), 1e6, math.random(-5e4, 5e4)), 999)
+                pcall(function()
+                    rs.remotes.kb:FireServer(p.Character.PrimaryPart, Vector3.new(math.random(-5e4, 5e4), 1e6, math.random(-5e4, 5e4)), 999)
+                end)
             end
         end
     end
@@ -305,14 +594,96 @@ task.spawn(function()
         if _G.Data.PerishLoop then
             for _, p in pairs(game.Players:GetPlayers()) do
                 if p ~= lp and p.Character and p.Character.PrimaryPart then
-                    rs.remotes.kb:FireServer(p.Character.PrimaryPart, Vector3.new(math.random(-5e4, 5e4), 1e6, math.random(-5e4, 5e4)), 999)
+                    pcall(function()
+                        rs.remotes.kb:FireServer(p.Character.PrimaryPart, Vector3.new(math.random(-5e4, 5e4), 1e6, math.random(-5e4, 5e4)), 999)
+                    end)
                 end
             end
         end
     end
 end)
 
--- INFO TAB
-Executions:Paragraph({ Title = "Total Executions:", Desc = tostring(Count) })
+-- --- SETTINGS TAB ---
+SettingsSection:Toggle({
+    Title = "Anti-AFK",
+    Desc = "Prevent being kicked for inactivity",
+    Default = false,
+    Callback = function(state)
+        if state then
+            local conn
+            conn = RunService.Heartbeat:Connect(function()
+                game:GetService("VirtualUser"):Button2Down(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+                task.wait(1)
+                game:GetService("VirtualUser"):Button2Up(Vector2.new(0,0), workspace.CurrentCamera.CFrame)
+            end)
+            print("[Rat Hub X] Anti-AFK Enabled")
+        else
+            print("[Rat Hub X] Anti-AFK Disabled")
+        end
+    end
+})
 
+SettingsSection:Button({
+    Title = "Reset Character",
+    Desc = "Reset your character",
+    Callback = function()
+        if lp.Character then
+            lp.Character:BreakJoints()
+            print("[Rat Hub X] Character reset")
+        end
+    end
+})
+
+SettingsSection:Button({
+    Title = "Rejoin Server",
+    Desc = "Rejoin the current server",
+    Callback = function()
+        game:GetService("TeleportService"):Teleport(game.PlaceId, lp)
+        print("[Rat Hub X] Rejoining server")
+    end
+})
+
+-- --- INFO TAB ---
+local countStr = "Loading..."
+InfoSection:Paragraph({ 
+    Title = "Total Executions", 
+    Desc = countStr 
+})
+
+InfoSection:Paragraph({
+    Title = "Game",
+    Desc = "Pixel Blade"
+})
+
+InfoSection:Paragraph({
+    Title = "Version",
+    Desc = "v0.1 [BETA]"
+})
+
+InfoSection:Paragraph({
+    Title = "Author",
+    Desc = "Ratkinator"
+})
+
+task.spawn(function()
+    pcall(function()
+        local r = game:HttpGet("https://halal-worker.vvladut245.workers.dev/", true)
+        local data = HttpService:JSONDecode(r)
+        countStr = tostring(data.global_count or "N/A")
+        print("[Rat Hub X] Execution Count: " .. countStr)
+    end)
+end)
+
+-- Select Home tab
 HomeTab:Select()
+
+-- Success notification
+task.wait(0.5)
+WindUI:Notify({
+    Title = "Rat Hub X",
+    Content = "Successfully loaded! Enjoy Pixel Blade.",
+    Duration = 3,
+    Icon = "check-circle",
+})
+
+print("[Rat Hub X] Script fully loaded!")
