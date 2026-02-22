@@ -1,0 +1,10 @@
+{
+  "name": "OuterTuneActivity",
+  "description": "Shows your OuterTune (YouTube Music) currently playing track as Discord Rich Presence. Requires patched OuterTune APK.",
+  "authors": [
+    {
+      "name": "you",
+      "id": "000000000000000000"
+    }
+  ]
+}
